@@ -4,49 +4,106 @@
  * SPDX-License-Identifier: CC0-1.0
  */
 
-#include <stdio.h>
-#include <inttypes.h>
-#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_chip_info.h"
-#include "esp_flash.h"
-#include "esp_system.h"
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
+#include "esp_lcd_panel_io.h"
+#include "screen.h"
+
+// ST7735 wiring (update these pin numbers for your board).
+#define PIN_NUM_MOSI 23
+#define PIN_NUM_CLK  18
+#define PIN_NUM_CS   5
+#define PIN_NUM_DC   17
+#define PIN_NUM_RES  16
+#define PIN_NUM_BL   4
+
+// 1.8" ST7735 resolution.
+#define LCD_H_RES 128
+#define LCD_V_RES 160
+
+// Backlight polarity and panel options.
+#define BL_ON_LEVEL 1
+#define PANEL_BGR 0
+#define PANEL_INVERT 0
+#define PANEL_COL_START 0
+#define PANEL_ROW_START 0
+#define PANEL_MADCTL_BASE 0xC0
+
+// SPI configuration that worked for this panel.
+#define LCD_SPI_MODE 0
+#define LCD_PCLK_HZ (20 * 1000 * 1000)
+
+// Full-screen RGB565 framebuffer in static storage (not on task stack).
+static uint16_t s_frame_buffer[LCD_H_RES * LCD_V_RES];
 
 void app_main(void)
 {
-    printf("Hello world!\n");
+    // Configure and initialize the SPI bus used by the LCD.
+    spi_bus_config_t buscfg = {
+        .sclk_io_num = PIN_NUM_CLK,
+        .mosi_io_num = PIN_NUM_MOSI,
+        .miso_io_num = -1,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_H_RES * LCD_V_RES * 2,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    /* Print chip information */
-    esp_chip_info_t chip_info;
-    uint32_t flash_size;
-    esp_chip_info(&chip_info);
-    printf("This is %s chip with %d CPU core(s), %s%s%s%s, ",
-           CONFIG_IDF_TARGET,
-           chip_info.cores,
-           (chip_info.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi/" : "",
-           (chip_info.features & CHIP_FEATURE_BT) ? "BT" : "",
-           (chip_info.features & CHIP_FEATURE_BLE) ? "BLE" : "",
-           (chip_info.features & CHIP_FEATURE_IEEE802154) ? ", 802.15.4 (Zigbee/Thread)" : "");
+    // Configure the command/data panel IO layer on top of SPI.
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .dc_gpio_num = PIN_NUM_DC,
+        .cs_gpio_num = PIN_NUM_CS,
+        .pclk_hz = LCD_PCLK_HZ,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = LCD_SPI_MODE,
+        .trans_queue_depth = 10,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
 
-    unsigned major_rev = chip_info.revision / 100;
-    unsigned minor_rev = chip_info.revision % 100;
-    printf("silicon revision v%d.%d, ", major_rev, minor_rev);
-    if(esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
-        printf("Get flash size failed");
-        return;
+    // Hardware reset pulse for the LCD controller.
+    gpio_set_direction(PIN_NUM_RES, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_NUM_RES, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(PIN_NUM_RES, 1);
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    // Panel profile corresponds to the previous hard-coded constants.
+    const st7735_panel_config_t panel_cfg = {
+        .bgr = PANEL_BGR,
+        .invert = PANEL_INVERT,
+        .madctl_base = PANEL_MADCTL_BASE,
+        .col_start = PANEL_COL_START,
+        .row_start = PANEL_ROW_START,
+    };
+
+    // Initialize controller registers and turn the display on.
+    st7735_init_panel(io_handle, &panel_cfg);
+
+    // Enable LCD backlight.
+    gpio_set_direction(PIN_NUM_BL, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_NUM_BL, BL_ON_LEVEL);
+
+    // Minimal draw demo: render a black smiley on several backgrounds.
+    while (true) {
+        const uint16_t bg_colors[] = {
+            0xF800, // red
+            0x07E0, // green
+            0x001F, // blue
+            0xFFE0, // yellow
+            0x07FF, // cyan
+            0xFFFF, // white
+        };
+
+        for (int i = 0; i < (int)(sizeof(bg_colors) / sizeof(bg_colors[0])); i++) {
+            screen_fill(s_frame_buffer, LCD_H_RES, LCD_V_RES, bg_colors[i]);
+            screen_draw_smiley(s_frame_buffer, LCD_H_RES, LCD_V_RES,
+                               LCD_H_RES / 2, LCD_V_RES / 2, 40, 0x0000);
+            screen_push(io_handle, &panel_cfg, s_frame_buffer, LCD_H_RES, LCD_V_RES);
+            vTaskDelay(pdMS_TO_TICKS(900));
+        }
     }
-
-    printf("%" PRIu32 "MB %s flash\n", flash_size / (uint32_t)(1024 * 1024),
-           (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
-    printf("Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
-
-    for (int i = 2; i >= 0; i--) {
-        printf("Restarting in %d seconds...\n", i);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-    printf("Restarting now.\n");
-    fflush(stdout);
-    esp_restart();
 }
