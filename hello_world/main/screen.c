@@ -2,6 +2,9 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <string.h>
+
+#define SCREEN_PUSH_MAX_PIXELS (128 * 160)
 
 #define ST7735_CMD_SWRESET 0x01
 #define ST7735_CMD_SLPOUT  0x11
@@ -35,6 +38,61 @@ static void st7735_cmd(esp_lcd_panel_io_handle_t io, uint8_t cmd)
 static void st7735_data(esp_lcd_panel_io_handle_t io, uint8_t cmd, const void *data, size_t len)
 {
     ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(io, cmd, data, len));
+}
+
+static uint16_t s_push_buffer[SCREEN_PUSH_MAX_PIXELS];
+
+screen_rect_t screen_rect_make(int x, int y, int w, int h)
+{
+    screen_rect_t rect = { x, y, w, h };
+    return rect;
+}
+
+screen_rect_t screen_rect_inflate(screen_rect_t rect, int amount, int max_w, int max_h)
+{
+    rect.x -= amount;
+    rect.y -= amount;
+    rect.w += amount * 2;
+    rect.h += amount * 2;
+
+    if (rect.x < 0) {
+        rect.w += rect.x;
+        rect.x = 0;
+    }
+    if (rect.y < 0) {
+        rect.h += rect.y;
+        rect.y = 0;
+    }
+    if (rect.x + rect.w > max_w) {
+        rect.w = max_w - rect.x;
+    }
+    if (rect.y + rect.h > max_h) {
+        rect.h = max_h - rect.y;
+    }
+
+    if (rect.w < 0) {
+        rect.w = 0;
+    }
+    if (rect.h < 0) {
+        rect.h = 0;
+    }
+    return rect;
+}
+
+screen_rect_t screen_rect_union(screen_rect_t a, screen_rect_t b)
+{
+    if (a.w <= 0 || a.h <= 0) {
+        return b;
+    }
+    if (b.w <= 0 || b.h <= 0) {
+        return a;
+    }
+
+    int x0 = (a.x < b.x) ? a.x : b.x;
+    int y0 = (a.y < b.y) ? a.y : b.y;
+    int x1 = ((a.x + a.w) > (b.x + b.w)) ? (a.x + a.w) : (b.x + b.w);
+    int y1 = ((a.y + a.h) > (b.y + b.h)) ? (a.y + a.h) : (b.y + b.h);
+    return screen_rect_make(x0, y0, x1 - x0, y1 - y0);
 }
 
 void st7735_init_panel(esp_lcd_panel_io_handle_t io, const st7735_panel_config_t *cfg)
@@ -124,11 +182,81 @@ void screen_fill(uint16_t *fb, uint16_t width, uint16_t height, uint16_t color)
     }
 }
 
+void screen_fill_rect(uint16_t *fb, uint16_t width, uint16_t height, screen_rect_t rect, uint16_t color)
+{
+    int x0 = rect.x;
+    int y0 = rect.y;
+    int x1 = rect.x + rect.w;
+    int y1 = rect.y + rect.h;
+
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    }
+    if (x1 > (int)width) {
+        x1 = width;
+    }
+    if (y1 > (int)height) {
+        y1 = height;
+    }
+
+    for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+            fb[y * width + x] = color;
+        }
+    }
+}
+
 void screen_push(esp_lcd_panel_io_handle_t io, const st7735_panel_config_t *cfg,
                  const uint16_t *fb, uint16_t width, uint16_t height)
 {
     st7735_set_window(io, cfg, 0, 0, width - 1, height - 1);
     ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io, ST7735_CMD_RAMWR, fb, width * height * sizeof(uint16_t)));
+}
+
+void screen_push_rect(esp_lcd_panel_io_handle_t io, const st7735_panel_config_t *cfg,
+                      const uint16_t *fb, uint16_t width, uint16_t height, screen_rect_t rect)
+{
+    int x0 = rect.x;
+    int y0 = rect.y;
+    int x1 = rect.x + rect.w - 1;
+    int y1 = rect.y + rect.h - 1;
+
+    if (rect.w <= 0 || rect.h <= 0) {
+        return;
+    }
+
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    }
+    if (x1 >= (int)width) {
+        x1 = width - 1;
+    }
+    if (y1 >= (int)height) {
+        y1 = height - 1;
+    }
+
+    st7735_set_window(io, cfg, (uint16_t)x0, (uint16_t)y0, (uint16_t)x1, (uint16_t)y1);
+
+    int region_w = x1 - x0 + 1;
+    int region_h = y1 - y0 + 1;
+    int region_pixels = region_w * region_h;
+
+    if (region_pixels > SCREEN_PUSH_MAX_PIXELS) {
+        screen_push(io, cfg, fb, width, height);
+        return;
+    }
+
+    for (int row = 0; row < region_h; row++) {
+        memcpy(&s_push_buffer[row * region_w], &fb[(y0 + row) * width + x0], (size_t)region_w * sizeof(uint16_t));
+    }
+
+    ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io, ST7735_CMD_RAMWR, s_push_buffer, region_pixels * sizeof(uint16_t)));
 }
 
 void screen_draw_pixel(uint16_t *fb, uint16_t width, uint16_t height,

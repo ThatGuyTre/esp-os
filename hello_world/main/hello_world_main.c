@@ -87,23 +87,46 @@ void app_main(void)
     gpio_set_direction(PIN_NUM_BL, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_NUM_BL, BL_ON_LEVEL);
 
-    // Minimal draw demo: render a black smiley on several backgrounds.
-    while (true) {
-        const uint16_t bg_colors[] = {
-            0xF800, // red
-            0x07E0, // green
-            0x001F, // blue
-            0xFFE0, // yellow
-            0x07FF, // cyan
-            0xFFFF, // white
-        };
+    const uint16_t background_color = 0x0000;
+    const uint16_t smiley_color = 0xFFFF;
+    const int radius = 24;
 
-        for (int i = 0; i < (int)(sizeof(bg_colors) / sizeof(bg_colors[0])); i++) {
-            screen_fill(s_frame_buffer, LCD_H_RES, LCD_V_RES, bg_colors[i]);
-            screen_draw_smiley(s_frame_buffer, LCD_H_RES, LCD_V_RES,
-                               LCD_H_RES / 2, LCD_V_RES / 2, 40, 0x0000);
-            screen_push(io_handle, &panel_cfg, s_frame_buffer, LCD_H_RES, LCD_V_RES);
-            vTaskDelay(pdMS_TO_TICKS(900));
+    int x = LCD_H_RES / 2;
+    int y = LCD_V_RES / 2;
+    int vx = 2;
+    int vy = 2;
+
+    screen_fill(s_frame_buffer, LCD_H_RES, LCD_V_RES, background_color);
+    screen_draw_smiley(s_frame_buffer, LCD_H_RES, LCD_V_RES, x, y, radius, smiley_color);
+    screen_push(io_handle, &panel_cfg, s_frame_buffer, LCD_H_RES, LCD_V_RES);
+
+    screen_rect_t prev_rect = screen_rect_make(x - radius - 2, y - radius - 2, (radius + 2) * 2, (radius + 2) * 2);
+
+    while (true) {
+        int next_x = x + vx;
+        int next_y = y + vy;
+
+        if (next_x - radius <= 0 || next_x + radius >= LCD_H_RES - 1) {
+            vx = -vx;
+            next_x = x + vx;
         }
+        if (next_y - radius <= 0 || next_y + radius >= LCD_V_RES - 1) {
+            vy = -vy;
+            next_y = y + vy;
+        }
+
+        screen_rect_t next_rect = screen_rect_make(next_x - radius - 2, next_y - radius - 2, (radius + 2) * 2, (radius + 2) * 2);
+        screen_rect_t dirty = screen_rect_union(prev_rect, next_rect);
+        dirty = screen_rect_inflate(dirty, 1, LCD_H_RES, LCD_V_RES);
+
+        screen_fill_rect(s_frame_buffer, LCD_H_RES, LCD_V_RES, dirty, background_color);
+        screen_draw_smiley(s_frame_buffer, LCD_H_RES, LCD_V_RES, next_x, next_y, radius, smiley_color);
+        screen_push_rect(io_handle, &panel_cfg, s_frame_buffer, LCD_H_RES, LCD_V_RES, dirty);
+
+        x = next_x;
+        y = next_y;
+        prev_rect = next_rect;
+
+        vTaskDelay(pdMS_TO_TICKS(25));
     }
 }
